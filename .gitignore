@@ -1,0 +1,26 @@
+# ── 真实凭证:绝不进仓库 ───────────────────────────────────────────
+# bots.env     飞书 App ID / App Secret(两个机器人各一对)+ provider 的 key
+# providers.toml 几十个中转站的 api_key,80KB
+# 两者都在本机重新生成,做法见 README「密钥从哪来」。仓库里永远不该有它们。
+bots.env
+providers.toml
+
+# ── 可重新获取的缓存 ───────────────────────────────────────────────
+# cc-connect 上游源码克隆(20MB)。.verify-models-heartbeat.sh 与 .verify-skill.sh
+# 拿它跟真实实现比对,所以本机验证时需要它,但它不该进仓库 —— 见 README 的重建命令。
+.cache/
+
+# ── agent 探测产物 ────────────────────────────────────────────────
+.probe-agents/
+
+# ── 验证脚本的运行产物 ─────────────────────────────────────────────
+# .verify-restore.sh 会造一个 /workspace 的假沙盒跑 restore-all.sh,
+# .verify-bootstrap.sh 会造仓库副本验判台逻辑,.verify-b64cmd/ 存 base64 中间结果;
+# 都是可重跑出来的。
+.verify-b64cmd/
+.verify-restore/
+.verify-bootstrap/
+
+# ── 无人引用的本机探针快照 ─────────────────────────────────────────
+# 一份中转站 /v1/models 的响应,全目录检索零引用。
+.models.json

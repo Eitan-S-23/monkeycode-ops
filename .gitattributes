@@ -1,0 +1,13 @@
+# 这些脚本的最终运行环境是 Linux 容器。Windows 上提交时若不管行尾,git 会把
+# 工作副本转成 CRLF,推上去的就是带 \r 的脚本 —— 到容器里报 `\r: command not
+# found`,而且报错行号是错的,极难查。所以行尾一律锁死 LF,不依赖各自的
+# core.autocrlf 设置。
+* text=auto eol=lf
+
+*.sh  text eol=lf
+*.py  text eol=lf
+*.md  text eol=lf
+
+# 二进制文件不碰
+*.png binary
+*.gz  binary
