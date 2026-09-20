@@ -1,7 +1,7 @@
 # monkeycode-ops
 
-MonkeyCode 容器(跑 cc-connect + codex/claude 两个飞书机器人 + CPA 代理)的
-部署与恢复脚本集。
+MonkeyCode 容器(跑 cc-connect + codex/claude 两个飞书机器人 + CPA 代理,
+可选再跑一个 mihomo/Clash 代理)的部署与恢复脚本集。
 
 **这个仓库存在的唯一理由**:那个容器**没有任何开机自启机制**,平台也不会在重启后
 替你拉起任何进程(依据见 `restore-all.sh` 头部,逐条列了平台源码里的查证位置)。
@@ -35,6 +35,27 @@ bash /workspace/cc-connect/restore-all.sh
 
 幂等,已经在跑的服务会跳过。跑完自己打汇总表。
 
+## Clash 代理(可选,但要手工投递一次订阅)
+
+容器里没有"系统代理"这一层 —— 装上 mihomo **不等于**谁自动走代理。要让哪个程序
+走,先 `source /workspace/clash/proxy.env` 再跑它。这也是它跟另外几样服务最大的
+区别:那些是"给容器用的",这个是"给你在那个 shell 里手动用的"。
+
+订阅(`config.yaml`)含节点密钥,和 `bots.env` 一样**不进仓库、也备份不了**,
+所以脚本只能替你把内核拉起来,装不了订阅:
+
+```bash
+# 1. 把本机订阅 YAML 投递成 /workspace/clash/config.yaml
+#    控制台自带文件管理器:开发环境 → 文件(/console/files?envid=...&path=/workspace/clash)
+#    直接传 config.yaml 即可,10MB 以内都行;没有界面时用 make-upload-cmd.sh
+#    生成 base64 一行命令,粘进 web 终端(生成物含节点密钥,别贴进聊天)
+# 2. 拉起内核(首次自动下内核二进制与规则库,约 35MB;之后跳过)
+bash /workspace/cc-connect/clash-install.sh
+```
+
+之后 `restore-all.sh` 的 `[5/6]` 段每次都会带上它:已经在跑就跳过,没跑就调上面
+这个脚本。没投递订阅时那一段打印一行"跳过",**不影响**其它服务恢复。
+
 ## 密钥从哪来(为什么仓库里没有)
 
 **仓库零密钥,而且不需要备份密钥就能重建** —— 因为两个密钥文件都是**本机生成**的:
@@ -56,6 +77,8 @@ bash /workspace/cc-connect/restore-all.sh
 
 **恢复与部署**(在容器里跑)
 - `restore-all.sh` — 容器重启后一键恢复,幂等;先跑这个
+- `clash-install.sh` — 装/起 mihomo(Clash.Meta)内核,幂等;由 `restore-all.sh`
+  的 `[5/6]` 段调用。**它只装内核,装不了订阅** —— 订阅含节点密钥,只能手工投递
 - `deploy-cc-connect.sh` / `deploy-codex.sh` / `deploy-cpa-tunnel.sh` — 首次部署
 - `rollback-cc-connect.sh` — 回滚
 

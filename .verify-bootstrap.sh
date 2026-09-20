@@ -187,6 +187,9 @@ sys.exit(1 if b.count(b'\r') else 0)" "$DL/bootstrap.sh"; then
     && ok "tarball 里的脚本落到位" || bad "tarball 没铺出脚本"
   [ -f "$E2E/skills/feishu-send/SKILL.md" ] \
     && ok "tarball 里的 skills/ 落到位" || bad "tarball 没铺出 skills/"
+  # restore-all.sh 的 [5/6] 段会去调 $CC_DIR/clash-install.sh,铺不到就等于那段永远报"脚本缺失"
+  [ -f "$E2E/clash-install.sh" ] \
+    && ok "tarball 里的 clash-install.sh 落到位" || bad "clash-install.sh 没铺出去(restore-all 的 Clash 段会失效)"
   printf '%s' "$out6" | grep -q '缺 bots.env' \
     && ok "下载分支也正确报告了缺失项" || bad "下载分支没报告缺失项"
 

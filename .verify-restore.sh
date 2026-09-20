@@ -76,7 +76,8 @@ chmod +x "$BIN/pgrep" "$BIN/flock" "$BIN/curl"
 build_sandbox() {
     rm -rf "$SB/workspace"
     mkdir -p "$SB/workspace/cc-connect" "$SB/workspace/feishu-bot" \
-             "$SB/workspace/cpa" "$SB/workspace/cloudflared-state"
+             "$SB/workspace/cpa" "$SB/workspace/cloudflared-state" \
+             "$SB/workspace/clash"
 
     cat > "$SB/workspace/cc-connect/run.sh" <<EOF
 #!/bin/bash
@@ -108,6 +109,17 @@ EOF
 echo launched > "$SB/workspace/cloudflared-state/launched.marker"
 EOF
     chmod +x "$SB/workspace/cc-connect/deploy-cpa-tunnel.sh"
+
+    # Clash:restore-all.sh 只"调"安装脚本,拉起动作在脚本里 —— 桩照这个分工写,
+    # mihomo 的进程登记由桩 clash-install.sh 完成(与容器里的真实行为一致)。
+    # 留 marker 是为了能断言"该跳过时确实没调脚本",光看进程表分不清是没调还是调了没起来。
+    printf 'port: 7890\nsocks-port: 7891\n' > "$SB/workspace/clash/config.yaml"
+    cat > "$SB/workspace/cc-connect/clash-install.sh" <<EOF
+#!/bin/bash
+touch "$SB/workspace/clash/installed.marker"
+echo "$SB/workspace/clash/mihomo -d $SB/workspace/clash" >> "\$VERIFY_RUNNING"
+EOF
+    chmod +x "$SB/workspace/cc-connect/clash-install.sh"
 
     : > "$SB/workspace/cc-connect/config.toml"
     : > "$SB/workspace/feishu-bot/feishu-bot-config.json"
@@ -158,6 +170,8 @@ grep -q "cli-proxy-api --config config.yaml" "$VD/running" && ok "A: CPA 被拉�
 grep -q "cc-connect --config" "$VD/running" && ok "A: cc-connect 被拉起" || fail "A: cc-connect 未拉起"
 grep -q "feishu-bot.py" "$VD/running" && ok "A: 自研 bot 被拉起" || fail "A: 自研 bot 未拉起"
 [ -f "$SB/workspace/cloudflared-state/launched.marker" ] && ok "A: 隧道脚本被调用" || fail "A: 隧道脚本未调用"
+[ -f "$SB/workspace/clash/installed.marker" ] && ok "A: clash 安装脚本被调用" || fail "A: clash 安装脚本未调用"
+grep -q "clash/mihomo" "$VD/running" && ok "A: mihomo 被拉起" || fail "A: mihomo 未拉起"
 echo
 
 # 场景 B:所有服务都在跑 —— 应当全部跳过,进程表不应新增
@@ -165,12 +179,15 @@ run_case "B 全在跑(应全跳过)" \
 "$SB/workspace/cpa/cli-proxy-api --config config.yaml
 $SB/workspace/cc-connect/cc-connect --config $SB/workspace/cc-connect/config.toml
 $SB/workspace/feishu-bot/venv/bin/python $SB/workspace/feishu-bot/feishu-bot.py
-cloudflared tunnel --no-autoupdate run --token xxx" \
+cloudflared tunnel --no-autoupdate run --token xxx
+$SB/workspace/clash/mihomo -d $SB/workspace/clash" \
     "1" "cli_botappid01" "cli_codexappid02"
 cp "$OUT" "$VD/outB.txt"
 SKIP=$(grep -c "➖ 已在运行" "$VD/outB.txt")
-[ "$SKIP" -ge 4 ] && ok "B: 四个服务全部识别为已在运行(命中 $SKIP 处)" || fail "B: 只识别出 $SKIP 处已在运行,期望 ≥4"
+[ "$SKIP" -ge 5 ] && ok "B: 五个服务全部识别为已在运行(命中 $SKIP 处)" || fail "B: 只识别出 $SKIP 处已在运行,期望 ≥5"
 [ -f "$SB/workspace/cloudflared-state/launched.marker" ] && fail "B: 隧道脚本被重复调用" || ok "B: 未重启隧道"
+[ -f "$SB/workspace/clash/installed.marker" ] && fail "B: clash 安装脚本被重复调用" || ok "B: 未重跑 clash 安装脚本"
+grep -c "clash/mihomo" "$VD/running" | grep -qx 1 && ok "B: 没有起出第二份 mihomo" || fail "B: mihomo 进程条目不止一条(起了第二份)"
 [ -f "$SB/workspace/cc-connect/run.sh" ] && ok "B: 未重写 cc-connect 启动器" || fail "B: 启动器被覆盖"
 echo
 
@@ -192,15 +209,57 @@ printf '{"app_id":"cli_b2"}\n' > "$SB/workspace/feishu-bot/feishu-bot-config.jso
 echo "══ 场景:D watchdog 命令行不得被误判为隧道进程 ══"
 VERIFY_RUNNING="$VD/running" VERIFY_CPA_UP="1" PATH="$BIN:$PATH" \
     timeout 200 bash "$VD/restore-sandbox.sh" > "$OUT" 2>&1
-# 只看隧道那一段:其它服务本来就没跑,整篇 grep "➖ 已在运行" 会误命中 CPA 的端口判活
-sed -n '/\[4\/5\]/,/\[5\/5\]/p' "$OUT" | sed 's/^/    /'
-TUNNEL_SEC=$(sed -n '/\[4\/5\]/,/\[5\/5\]/p' "$OUT")
+# 只看隧道那一段:其它服务本来就没跑,整篇 grep "➖ 已在运行" 会误命中 CPA 的端口判活。
+# 断言取的区间止于 [5/6](隧道段结束),把 Clash 段排除在外 —— 否则以后 Clash 段
+# 新增任何一句"已在运行"都会把这条断言拖下水,而它本来只在测隧道判活。
+sed -n '/\[4\/6\]/,/\[6\/6\]/p' "$OUT" | sed 's/^/    /'
+TUNNEL_SEC=$(sed -n '/\[4\/6\]/,/\[5\/6\]/p' "$OUT")
 if printf '%s' "$TUNNEL_SEC" | grep -q "➖ 已在运行"; then
     fail "D: 把 watchdog 命令行误判成隧道进程(旧 bug 复现)"
 else
     ok "D: 未误判 watchdog 命令行"
 fi
 printf '%s' "$TUNNEL_SEC" | grep -q "已在后台启动" && ok "D: 正确识别隧道不在跑并拉起" || fail "D: 未拉起隧道"
+echo
+
+# ---------- Clash 段的两条异常路径 ----------
+# 公共铺垫:除 Clash 外全部预置为"已在运行",把跑一次的成本压到最低,也把断言
+# 限制在 Clash 段自身 —— 其它段本来就不该因为 Clash 缺席而改变行为。
+# $1=场景名 $2=破坏动作的函数名(在同一 shell 作用域里定义,直接用 $SB)
+CASE_RC=0
+run_clash_case() {
+    build_sandbox
+    "$2"
+    : > "$VD/running"
+    printf '%s\n' \
+        "$SB/workspace/cpa/cli-proxy-api --config config.yaml" \
+        "$SB/workspace/cc-connect/cc-connect --config $SB/workspace/cc-connect/config.toml" \
+        "cloudflared tunnel run" >> "$VD/running"
+    printf 'app_id = "cli_a1"\n' > "$SB/workspace/cc-connect/config.toml"
+    printf '{"app_id":"cli_b2"}\n' > "$SB/workspace/feishu-bot/feishu-bot-config.json"
+    echo "══ 场景:$1 ══"
+    VERIFY_RUNNING="$VD/running" VERIFY_CPA_UP="1" PATH="$BIN:$PATH" \
+        timeout 200 bash "$VD/restore-sandbox.sh" > "$OUT" 2>&1
+    CASE_RC=$?
+    sed -n '/\[5\/6\]/,/\[6\/6\]/p' "$OUT" | sed 's/^/    /'
+}
+drop_config() { rm -f "$SB/workspace/clash/config.yaml"; }
+drop_installer() { rm -f "$SB/workspace/cc-connect/clash-install.sh"; }
+
+# 场景 E:内核装过、订阅没投递 —— 容器里的常态(订阅含密钥,仓库里没有)
+run_clash_case "E 缺订阅 config.yaml(应跳过,不影响其它服务)" drop_config
+grep -q "未装或订阅未投递" "$OUT" && ok "E: 明确报出跳过原因" || fail "E: 未说明跳过原因"
+[ -f "$SB/workspace/clash/installed.marker" ] && fail "E: 缺订阅仍调了安装脚本" || ok "E: 没有硬调安装脚本"
+[ "$CASE_RC" = "0" ] && ok "E: 退出码 0,Clash 缺席没让恢复流程失败" || fail "E: 退出码 $CASE_RC"
+grep -q "恢复流程执行完毕" "$OUT" && ok "E: 流程走到了结尾" || fail "E: 流程中途断了"
+echo
+
+# 场景 F:restore-all.sh 是新的,但脚本是旧 bootstrap 铺的 —— 必须指名怎么办,
+# 而不是含糊地"跳过"(跳过会让人以为 Clash 没事,实际是脚本没到位)
+run_clash_case "F 缺 clash-install.sh(应报错并给出重铺命令)" drop_installer
+grep -q "安装脚本缺失" "$OUT" && ok "F: 报出脚本缺失" || fail "F: 未报出脚本缺失"
+grep -q "bootstrap.sh" "$OUT" && ok "F: 给出了重铺脚本的命令" || fail "F: 没说清怎么补脚本"
+[ -f "$SB/workspace/clash/installed.marker" ] && fail "F: 缺脚本仍调了安装" || ok "F: 没有硬调不存在的脚本"
 echo
 
 echo "══ 结果 ══"

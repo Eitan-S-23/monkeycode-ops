@@ -17,12 +17,17 @@
 # 结论:容器一重启,所有进程都不会自己回来 —— /workspace 里的文件还在,但没人执行。
 # 手工跑一次本脚本即可全部复原,脚本本身幂等,重复跑不会起出第二份。
 #
-# ── 恢复哪四样(每样都先判活,在跑就跳过) ─────────────────────────────
-#   [1/5] CPA 本体      /workspace/cpa/cli-proxy-api     平台不代管,自己起
-#   [2/5] cc-connect    /workspace/cc-connect            codex + claude 两个机器人
-#   [3/5] 自研 bot      /workspace/feishu-bot            原有机器人(仅新建机器人模式下)
-#   [4/5] CPA 隧道      /workspace/cloudflared-state     管理面板对外暴露(依赖 [1/5])
-#   [5/5] 汇总
+# ── 恢复哪五样(每样都先判活,在跑就跳过) ─────────────────────────────
+#   [1/6] CPA 本体      /workspace/cpa/cli-proxy-api     平台不代管,自己起
+#   [2/6] cc-connect    /workspace/cc-connect            codex + claude 两个机器人
+#   [3/6] 自研 bot      /workspace/feishu-bot            原有机器人(仅新建机器人模式下)
+#   [4/6] CPA 隧道      /workspace/cloudflared-state     管理面板对外暴露(依赖 [1/6])
+#   [5/6] Clash 代理    /workspace/clash                 mihomo,只起内核不重下已就位的文件
+#   [6/6] 汇总
+#
+# Clash 与其它几样有个本质区别:它的 config.yaml(订阅)含节点密钥,仓库里刻意
+# 没有,所以本脚本只能"把它拉起来",无法替它安装。订阅文件必须先手工投递到
+# /workspace/clash/config.yaml;没有它这一段直接跳过,不影响其它服务恢复。
 #
 # ── 设计要点 ────────────────────────────────────────────────────────
 # 1) 幂等靠"进程判活",不靠状态文件 —— 重启后状态文件可能还在但进程早没了,
@@ -44,6 +49,8 @@
 #   touch /workspace/feishu-bot/.stop             # 停自研 bot
 #   pkill -f '^/workspace/cpa/cli-proxy-api'      # 停 CPA(其 watchdog 会再拉起,
 #                                                 #  要彻底停就先 touch /workspace/cpa/.stop)
+#   pkill -f '^/workspace/clash/mihomo'           # 停 Clash 内核(它没有 watchdog,
+#                                                 #  杀掉即可,重跑本脚本会再拉起)
 
 set -uo pipefail
 
@@ -51,6 +58,7 @@ CC_DIR=/workspace/cc-connect
 BOT_DIR=/workspace/feishu-bot
 CPA_DIR=/workspace/cpa
 CF_STATE=/workspace/cloudflared-state
+CLASH_DIR=/workspace/clash
 CPA_PORT="${CPA_PORT:-8317}"
 
 cd "$CC_DIR" 2>/dev/null || { echo "❌ 目录不存在: $CC_DIR"; exit 1; }
@@ -93,6 +101,8 @@ for p in "$CPA_DIR" "$CC_DIR" "$BOT_DIR" "$CF_STATE"; do
 done
 [ -f "$CC_DIR/run.sh" ] && echo "  ✅ cc-connect 启动器" || echo "  ❌ cc-connect 启动器缺失(先跑 deploy-codex.sh)"
 [ -f "$CC_DIR/bots.env" ] && echo "  ✅ bots.env" || echo "  ⚠️ bots.env 缺失(隧道若走 named 模式会退回 quick)"
+# Clash 缺席是常态(没装 / 装了但订阅没投递),用 ➖ 而不是 ❌,免得看着像故障
+[ -s "$CLASH_DIR/config.yaml" ] && echo "  ✅ Clash 订阅 config.yaml" || echo "  ➖ Clash 未装(订阅含密钥,须手工投递 config.yaml)"
 echo
 
 # 部署模式判定:cc-connect 用的 App 与自研 bot 是否同一个
@@ -115,7 +125,7 @@ esac
 echo
 
 # ---------- 1. CPA 本体(隧道依赖它,必须最先起来) ----------
-echo "[1/5] CPA 本体(cli-proxy-api,端口 $CPA_PORT)..."
+echo "[1/6] CPA 本体(cli-proxy-api,端口 $CPA_PORT)..."
 if cpa_alive; then
     echo "  ➖ 已在运行,跳过"
 else
@@ -185,7 +195,7 @@ fi
 echo
 
 # ---------- 2. cc-connect(codex + claude 两个机器人) ----------
-echo "[2/5] cc-connect(codex / claude 机器人)..."
+echo "[2/6] cc-connect(codex / claude 机器人)..."
 if alive "/workspace/cc-connect/cc-connect"; then
     echo "  ➖ 已在运行,跳过"
 elif [ ! -f "$CC_DIR/run.sh" ]; then
@@ -211,7 +221,7 @@ fi
 echo
 
 # ---------- 3. 自研 bot(仅新建机器人模式下拉起) ----------
-echo "[3/5] 自研 bot(feishu-bot)..."
+echo "[3/6] 自研 bot(feishu-bot)..."
 if [ "$MODE" = "reuse" ]; then
     if alive "/workspace/cc-connect/cc-connect"; then
         echo "  ➖ 复用模式下它与 cc-connect 抢同一个 App 的长连接,按部署模式不拉起"
@@ -244,8 +254,8 @@ else
 fi
 echo
 
-# ---------- 4. CPA 隧道(依赖 [1/5] 的端口已通) ----------
-echo "[4/5] CPA 隧道(cloudflared)..."
+# ---------- 4. CPA 隧道(依赖 [1/6] 的端口已通) ----------
+echo "[4/6] CPA 隧道(cloudflared)..."
 if cf_alive; then
     echo "  ➖ 已在运行,跳过"
 elif [ ! -f "$CC_DIR/deploy-cpa-tunnel.sh" ]; then
@@ -257,8 +267,33 @@ else
 fi
 echo
 
-# ---------- 5. 汇总 ----------
-echo "[5/5] 汇总"
+# ---------- 5. Clash 代理(mihomo) ----------
+# 只拉起,不安装:安装动作全在 clash-install.sh 里(它自己也是幂等的 —— 内核
+# 二进制与规则库已就位就跳过下载,已经在跑就不起第二份)。这里多一层判活是为了
+# 在"已经在跑"时连脚本都不用调,省掉一次十几秒的配置预检。
+echo "[5/6] Clash 代理(mihomo)..."
+if alive "$CLASH_DIR/mihomo"; then
+    echo "  ➖ 已在运行,跳过"
+elif [ ! -s "$CLASH_DIR/config.yaml" ]; then
+    echo "  ➖ 未装或订阅未投递,跳过(不影响上面几样服务)"
+    echo "     订阅 config.yaml 含节点密钥,仓库里刻意没有,必须先手工投递一次:"
+    echo "     投递到 $CLASH_DIR/config.yaml 后重跑本脚本即可"
+elif [ ! -f "$CC_DIR/clash-install.sh" ]; then
+    # 脚本由 bootstrap.sh 铺下来。走到这里说明铺的是旧版本 —— 明说怎么办,
+    # 不猜、不代替用户去别处找脚本。
+    echo "  ❌ 安装脚本缺失: $CC_DIR/clash-install.sh"
+    echo "     它由 bootstrap.sh 铺下来,重跑一次再执行本脚本:"
+    echo "     curl -fsSL https://raw.githubusercontent.com/Eitan-S-23/monkeycode-ops/main/bootstrap.sh | bash"
+else
+    bash "$CC_DIR/clash-install.sh"
+    alive "$CLASH_DIR/mihomo" \
+        && echo "  ✅ 内核已在运行(代理 127.0.0.1:7890 / SOCKS 127.0.0.1:7891)" \
+        || echo "  ❌ 内核未起来,查 $CLASH_DIR/clash.log"
+fi
+echo
+
+# ---------- 6. 汇总 ----------
+echo "[6/6] 汇总"
 echo "  ┌──────────────────┬──────────────────────────────────────────"
 printf "  │ %-16s │ %s\n" "CPA 本体" "$(cpa_alive && echo "✅ 运行中  http://127.0.0.1:$CPA_PORT" || echo '➖ 未运行')"
 printf "  │ %-16s │ %s\n" "cc-connect" "$(alive '/workspace/cc-connect/cc-connect' && echo '✅ 运行中(codex / claude)' || echo '➖ 未运行')"
@@ -268,6 +303,7 @@ case "$MODE" in
     *)     printf "  │ %-16s │ %s\n" "自研 bot" "➖ 模式未判定,未动它" ;;
 esac
 printf "  │ %-16s │ %s\n" "CPA 隧道" "$(cf_alive && echo '✅ 运行中' || echo '⏳ 未运行/仍在建连,见下方日志')"
+printf "  │ %-16s │ %s\n" "Clash 代理" "$(alive "$CLASH_DIR/mihomo" && echo "✅ 运行中  http://127.0.0.1:7890" || echo '➖ 未运行')"
 echo "  └──────────────────┴──────────────────────────────────────────"
 echo
 echo "隧道地址(建连需要几十秒,稍后看):"
@@ -280,5 +316,11 @@ echo "  tail -30 $CC_DIR/cc.log            # codex / claude"
 echo "  tail -30 $BOT_DIR/bot.log          # 自研 bot"
 echo "  tail -30 $CPA_DIR/cpa.log          # CPA 本体"
 echo "  tail -30 $CC_DIR/cpa-tunnel.log    # 隧道"
+echo "  tail -30 $CLASH_DIR/clash.log      # Clash 内核"
+echo
+echo "Clash 是内核不是系统代理 —— 容器里没有系统代理那一层,装上不等于生效。"
+echo "要让哪个程序走,先 source 一下再跑它:"
+echo "  source $CLASH_DIR/proxy.env"
+echo "单条命令走代理:curl -x http://127.0.0.1:7890 https://www.google.com"
 echo
 echo "✅ 恢复流程执行完毕。"

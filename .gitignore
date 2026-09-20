@@ -15,11 +15,13 @@ providers.toml
 
 # ── 验证脚本的运行产物 ─────────────────────────────────────────────
 # .verify-restore.sh 会造一个 /workspace 的假沙盒跑 restore-all.sh,
+# .verify-clash.sh 会把 clash-install.sh 的路径改成临时目录再跑,
 # .verify-bootstrap.sh 会造仓库副本验判台逻辑,.verify-b64cmd/ 存 base64 中间结果;
 # 都是可重跑出来的。
 .verify-b64cmd/
 .verify-restore/
 .verify-bootstrap/
+.verify-tmp/
 
 # ── 无人引用的本机探针快照 ─────────────────────────────────────────
 # 一份中转站 /v1/models 的响应,全目录检索零引用。

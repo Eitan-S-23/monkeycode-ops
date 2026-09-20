@@ -133,3 +133,14 @@ fi
 say "     bash $CC_DIR/restore-all.sh"
 say ""
 say "   restore-all.sh 幂等,已经在跑的服务会跳过,跑完自己打汇总表。"
+
+# Clash 刻意不计入 blockers:它是可选件,没有代理 cc-connect 照样跑。
+# 但它是**唯一必须手工投递**的东西 —— 订阅 config.yaml 含节点密钥,仓库里没有,
+# 不在这里提一句,重建后没人会想起来。投递后 restore-all.sh 自己会把它拉起来。
+CLASH_DIR="${CLASH_DIR:-/workspace/clash}"
+if [ ! -s "$CLASH_DIR/config.yaml" ]; then
+  say ""
+  say "○ 另外(可选):没看到 Clash 订阅 $CLASH_DIR/config.yaml"
+  say "   订阅含节点密钥,仓库里刻意没有,只能手工投递一份进去;投递完重跑 restore-all.sh 即可,"
+  say "   它会把内核拉起来(内核二进制与规则库由它自己下)。不需要代理就忽略这条。"
+fi
