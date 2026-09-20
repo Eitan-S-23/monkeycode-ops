@@ -56,6 +56,40 @@ bash /workspace/cc-connect/clash-install.sh
 之后 `restore-all.sh` 的 `[5/6]` 段每次都会带上它:已经在跑就跳过,没跑就调上面
 这个脚本。没投递订阅时那一段打印一行"跳过",**不影响**其它服务恢复。
 
+### 让 codex / claude 跟着分流走(`set-agent-proxy.py`)
+
+上面那步只是把 mihomo 拉起来,**不会**有谁自动走它 —— 容器里没有"系统代理"这一层。
+要让 cc-connect 里跑的两个 agent 走,得把代理地址注入给它们:
+
+```bash
+python3 /workspace/cc-connect/set-agent-proxy.py     # 只读巡检,看当前挂没挂
+python3 /workspace/cc-connect/set-agent-proxy.py --on --restart
+python3 /workspace/cc-connect/set-agent-proxy.py --off
+```
+
+它改的是 `config.toml` 里每个 codex / claudecode project 的
+`[projects.agent.options.env]` 子表 —— cc-connect 支持按 project 注入环境变量,这两个
+agent 都读它(agent/claudecode/claudecode.go:226、agent/codex/codex.go:77)。注入
+`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` 四个键,幂等,改写前先用
+TOML 解析器回验,解析不过绝不落盘。
+
+挂上之后的行为**不是**"所有流量都走节点":两个 CLI 的出站先交给 mihomo,由订阅里
+那 1335 条规则逐条判 —— 命中 `GEOIP,CN,DIRECT` 的直连,其余走节点,省的是节点流量。
+但"先交给 mihomo"这一步是全部:判成直连的也照样经过它,所以 mihomo 不在时它们会
+**全断,不会自动退回直连**。
+
+两条容易忽略的细节:
+
+- `NO_PROXY` 里必须含 `127.0.0.1` —— codex 的 app server 连的是
+  `ws://127.0.0.1:3845`(agent/codex/codex.go:123),本机连接走代理会直接连不上。
+- **只给这两个 agent 挂,不挂 cc-connect 自己**。另一条更省事的路是往 `run.sh` 里
+  `source proxy.env`,但那会把 cc-connect 的飞书长连接也推进 mihomo:mihomo 一挂,
+  机器人连消息都收不到,你只能去网页终端看现场。现在这样至少还收得到一句"我出站
+  全失败了"。
+
+⚠️ **重新跑 `deploy-codex.sh` 会重写 `config.toml`,写进去的 env 段会一起没掉**,
+需要重跑一次本脚本。`restore-all.sh` 不重写 `config.toml`,所以容器重启不受影响。
+
 ## 密钥从哪来(为什么仓库里没有)
 
 **仓库零密钥,而且不需要备份密钥就能重建** —— 因为两个密钥文件都是**本机生成**的:
@@ -90,6 +124,8 @@ bash /workspace/cc-connect/clash-install.sh
 - `apply-providers.py` — 把导出的 provider 段并进容器的 `config.toml`
 - `set-heartbeat.py` — 配心跳;session_key 自动发现(扫快照文件里所有像
   `平台:会话:用户` 的字符串,不赌它落在哪个字段)
+- `set-agent-proxy.py` — 给 codex / claude 两个 agent 注入 Clash 代理(上一条的
+  下一层,做法见「让 codex / claude 跟着分流走」)
 
 **命令生成**(在本机跑,专为过飞书)
 - `make-skill-cmd.sh` / `make-fallback-cmd.py` / `make-upload-cmd.sh` /

@@ -17,11 +17,17 @@ providers.toml
 # .verify-restore.sh 会造一个 /workspace 的假沙盒跑 restore-all.sh,
 # .verify-clash.sh 会把 clash-install.sh 的路径改成临时目录再跑,
 # .verify-bootstrap.sh 会造仓库副本验判台逻辑,.verify-b64cmd/ 存 base64 中间结果;
+# .verify-agent-proxy.sh 造仿造的 config.toml 验增删代理段的对称性;
 # 都是可重跑出来的。
 .verify-b64cmd/
 .verify-restore/
 .verify-bootstrap/
 .verify-tmp/
+.verify-agent-proxy/
+
+# python 的字节码缓存:验证脚本里 py_compile 那一步若不重定向就会留一个(已重定向,
+# 这里兜底,免得以后再踩)
+__pycache__/
 
 # ── 无人引用的本机探针快照 ─────────────────────────────────────────
 # 一份中转站 /v1/models 的响应,全目录检索零引用。
