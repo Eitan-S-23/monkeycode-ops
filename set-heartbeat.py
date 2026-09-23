@@ -18,14 +18,19 @@
 用法(容器内):
     python3 set-heartbeat.py                    # 列出各 project 已发现的会话键,不改配置
     python3 set-heartbeat.py codex              # 给 codex 启用心跳(会话键自动发现)
+    python3 set-heartbeat.py codex1 codex2      # 一次配多个(逐台各取自己的会话键,一次重启)
+    python3 set-heartbeat.py codex1 codex2 --like codex        # 参数照抄 codex 那台
+    python3 set-heartbeat.py codex1 codex2 --like codex --dry-run   # 只报告,不落盘
     python3 set-heartbeat.py codex --off        # 关闭(保留配置段,便于再开)
     python3 set-heartbeat.py codex --key feishu:oc_xxx:ou_yyy   # 显式指定,跳过自动发现
     python3 set-heartbeat.py codex --interval 60 --prompt "检查未完成任务"
     python3 set-heartbeat.py codex --restart    # 写完立即重启 cc-connect 使配置生效
 
-要"和本机完全一致",六个字段都得给全(本机 codex-test2 的实际值):
-    python3 set-heartbeat.py codex \
-        --interval 1 --timeout 1 --only-when-idle --no-silent --prompt "请继续之前的工作"
+--like <project>:把那个 project 心跳段里的参数(interval_mins / timeout_mins /
+    only_when_idle / silent / prompt)原样抄给目标,只把 session_key 换成目标自己的。
+    这是“多台机器人要与现有那台完全一致”的正确做法:中文提示词经飞书转发会变成
+    U+FFFD,手抄参数抄错一位又不会报任何错。enabled 恒为 true(要关用 --off)。
+--key 只能配单个 project:每个机器人的会话键不同,一个键套不到多台上。
 --silent / --only-when-idle 不写就沿用 cc-connect 的默认值,不会硬塞进配置。
 
 安全约定:改写前先用 TOML 解析器回验,解析不过绝不落盘 —— 配置写坏会让
@@ -59,9 +64,12 @@ def parse_args():
         description="配置 cc-connect 心跳(会话键自动发现)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("project", nargs="?", help="目标 project 名(如 codex);省略则只列出会话键")
+    p.add_argument("projects", nargs="*",
+                   help="目标 project 名,可给多个(如 codex1 codex2);省略则只列出会话键")
     p.add_argument("--config", default=DEFAULT_CONFIG, help=f"配置文件路径(默认 {DEFAULT_CONFIG})")
-    p.add_argument("--key", default="", help="显式指定 session_key,跳过自动发现")
+    p.add_argument("--key", default="", help="显式指定 session_key,跳过自动发现(只能配单个 project)")
+    p.add_argument("--like", default="", help="照抄该 project 的心跳参数,只换 session_key")
+    p.add_argument("--dry-run", action="store_true", help="只报告将要写什么,不落盘")
     p.add_argument("--off", action="store_true", help="关闭心跳(enabled = false)")
     p.add_argument("--interval", type=int, default=0, help="间隔分钟数(默认 30)")
     p.add_argument("--prompt", default="", help="心跳提示词;留空则读 work_dir 下的 HEARTBEAT.md")
@@ -132,6 +140,24 @@ def project_blocks(lines, doc):
                 break
         blocks.append({"name": name, "start": start, "end": end})
     return blocks
+
+
+def heartbeat_of(doc, name):
+    """取某 project 的 heartbeat 段(供 --like 照抄)。
+
+    返回:dict(有段,可能为空) / {} (有 project 但没段) / None(没有这个 project)。
+    三种情况要分开 —— 把"没有这个 project"和"有这个 project 但没配心跳"混成一个
+    错误提示,会让人以为名字写错了。
+    """
+    for proj in (doc or {}).get("projects", []):
+        if proj.get("name") == name:
+            return proj.get("heartbeat") or {}
+    return None
+
+
+def prev_heartbeat_key(doc, name):
+    """取该 project 现有心跳段的 session_key(--off 时保留它,重开不用再发现一次)"""
+    return (heartbeat_of(doc, name) or {}).get("session_key") or ""
 
 
 def _iter_strings(node):
@@ -234,9 +260,88 @@ def build_heartbeat(key, enabled, interval, prompt, timeout, silent, only_when_i
     return ["", *lines]
 
 
-def extras_of(args):
-    """回验要核的额外开关。值为 None = 用户没指定,不写进配置也不核。"""
-    return {"silent": args.silent, "only_when_idle": args.only_when_idle}
+def merge_opts(args, like):
+    """把命令行参数与 --like 源合并:命令行优先,源补齐,都没有则留 0/None(不写进配置)。
+
+    interval / timeout 用 `or` 合并而两个开关用 `is not None` —— 前者 0 表示"没指定",
+    后者 False 是合法取值。混用会让 --no-silent 被源里的 true 顶掉。
+    """
+    return {
+        "interval": args.interval or like.get("interval_mins") or 0,
+        "timeout": args.timeout or like.get("timeout_mins") or 0,
+        "prompt": args.prompt or like.get("prompt", ""),
+        "only_when_idle": (args.only_when_idle if args.only_when_idle is not None
+                           else like.get("only_when_idle")),
+        "silent": args.silent if args.silent is not None else like.get("silent"),
+    }
+
+
+def effective_extras(opts):
+    """回验要核的额外开关。值为 None = 最终没定,不写进配置也不核。"""
+    return {"silent": opts["silent"], "only_when_idle": opts["only_when_idle"]}
+
+
+def describe_opts(opts):
+    """把"这次实际写了什么"写成一行;没定的键明说沿用 cc-connect 默认值,不替它声张"""
+    parts = [f"interval_mins={opts['interval'] or 30}", f"timeout_mins={opts['timeout'] or 30}"]
+    for name in ("only_when_idle", "silent"):
+        parts.append(f"{name}={opts[name]}" if opts[name] is not None
+                     else f"{name}=(未指定,沿用默认)")
+    parts.append("prompt=" + (json.dumps(opts["prompt"], ensure_ascii=False) if opts["prompt"]
+                              else "(未设,读 work_dir/HEARTBEAT.md)"))
+    return ", ".join(parts)
+
+
+def collect_targets(blocks, names):
+    """按给定名字取区块;名字不存在就带着可选列表停下(不猜、不改)"""
+    out = []
+    for name in names:
+        block = next((b for b in blocks if b["name"] == name), None)
+        if block is None:
+            raise SystemExit(f"❌ 没有名为 {name!r} 的 project;可选: "
+                             + ", ".join(b["name"] for b in blocks))
+        out.append(block)
+    return out
+
+
+def resolve_key(args, data_dir, block, prev_key=""):
+    """定这个 project 的会话键,返回 (键, 来源说明)。
+
+    --off 优先沿用原值,其次 --key;开启时 --key 优先,否则自动发现。
+    发现到多个候选时**不挑一个** —— 选错了心跳会发到别人/别的会话里,而且不报错。
+    """
+    name = block["name"]
+    if args.off:
+        key = args.key or prev_key
+        if not key:
+            raise SystemExit(f"❌ 关闭 {name} 时原配置里没有 session_key,也没给 --key;"
+                             "直接删掉那段配置即可")
+        return key, "(沿用原值)"
+    if args.key:
+        return args.key, "(显式指定)"
+    found = discover_sessions(data_dir, name)
+    if not found:
+        raise SystemExit(
+            f"❌ 没发现 {name} 的任何会话。\n"
+            "   心跳的 session_key 必须等于机器人实际在用的会话键,猜不出来。\n"
+            "   请先在飞书给该机器人发一条消息,再重跑本脚本。"
+        )
+    keys = [k for _, k, _ in found]
+    if len(keys) > 1:
+        print(f"  ⚠️ {name} 发现 {len(keys)} 个会话,无法确定该用哪个 —— 用 --key 指定其一:")
+        for updated, key, path in found:
+            print(f"      {key}    (最近活动 {updated or '未知'}, {path.name})")
+        raise SystemExit(f"  例如: python3 set-heartbeat.py {name} --key {keys[0]}")
+    return keys[0], f"(来自 {found[0][2].name})"
+
+
+def write_text_lf(path, text):
+    """按 LF 写回。显式 newline="\\n" 是因为 Windows 上 write_text 默认写 CRLF ——
+    配置的行尾不该随"改它的机器"而变;本机验证要在字节层面比对改写前后的差异,
+    行尾被悄悄换掉会让那种断言失真成一个查不出原因的差异。
+    """
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
 
 
 def splice(lines, block, heartbeat):
@@ -300,7 +405,7 @@ def main():
     data_dir = find_data_dir(text, doc)
 
     # 无参数 = 只读巡检:把各 project 能发现的会话键列出来
-    if not args.project:
+    if not args.projects:
         print(f"配置文件: {cfg}")
         print(f"数据目录: {data_dir}")
         print()
@@ -313,76 +418,82 @@ def main():
             for updated, key, _ in found:
                 print(f"    {key}    (最近活动 {updated or '未知'})")
         print()
-        print("启用心跳: python3 set-heartbeat.py <project>")
+        print("启用心跳: python3 set-heartbeat.py <project> [<project> ...]")
+        print("照抄现有那台: python3 set-heartbeat.py codex1 codex2 --like codex")
         return 0
 
-    target = next((b for b in blocks if b["name"] == args.project), None)
-    if target is None:
-        raise SystemExit(f"❌ 没有名为 {args.project!r} 的 project;可选: "
-                         + ", ".join(b["name"] for b in blocks))
+    targets = collect_targets(blocks, args.projects)
+    if args.key and len(targets) > 1:
+        raise SystemExit("❌ --key 只能配单个 project:每个机器人的会话键不同,"
+                         "一个键套不到多台上。")
+    if args.like and args.off:
+        raise SystemExit("❌ --off 与 --like 不能同时用:前者关心跳,后者照抄源项目的开启参数。")
 
-    # 关闭心跳时保留原 session_key(重开不用再发现一次)
-    if args.off:
-        prev = ((doc or {}).get("projects") and next(
-            (p.get("heartbeat") or {} for p in doc["projects"] if p.get("name") == args.project), {}))
-        key = args.key or (prev or {}).get("session_key", "")
-        if not key:
-            raise SystemExit("❌ 关闭时原配置里没有 session_key,也没给 --key;"
-                             "直接删掉那段配置即可")
-        hb = build_heartbeat(key, False, args.interval, args.prompt, args.timeout,
-                             args.silent, args.only_when_idle)
-        new_lines = splice(lines, target, hb)
-        note = verify("\n".join(new_lines), args.project, key, False, extras=extras_of(args))
-        cfg.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-        print(f"  ✅ 已关闭 {args.project} 的心跳" + (f"({note})" if note else ""))
-        return report_restart(args)
+    # --like:照抄源 project 的心跳参数(只换 session_key)
+    like = {}
+    if args.like:
+        if doc is None:
+            raise SystemExit("❌ --like 要用 TOML 解析器读源 project 的 heartbeat 段,"
+                             "而当前 python 没有 tomllib(需 3.11+)。")
+        got = heartbeat_of(doc, args.like)
+        if got is None:
+            raise SystemExit(f"❌ 没有名为 {args.like!r} 的 project;可选: "
+                             + ", ".join(b["name"] for b in blocks))
+        if not got:
+            raise SystemExit(f"❌ {args.like} 没有 [projects.heartbeat] 段,没有可照抄的参数;"
+                             "请用 --interval / --prompt 等直接指定。")
+        like = got
+    opts = merge_opts(args, like)
 
-    # 开启:显式给了 --key 就用,否则自动发现
-    if args.key:
-        key = args.key
-        print(f"  使用显式指定的会话键: {key}")
-    else:
-        found = discover_sessions(data_dir, args.project)
-        if not found:
-            raise SystemExit(
-                f"❌ 没发现 {args.project} 的任何会话。\n"
-                "   心跳的 session_key 必须等于机器人实际在用的会话键,猜不出来。\n"
-                "   请先在飞书给该机器人发一条消息,再重跑本脚本。"
-            )
-        keys = [k for _, k, _ in found]
-        if len(keys) > 1:
-            print(f"  发现 {len(keys)} 个会话,无法确定该用哪个 —— 请用 --key 指定其一:")
-            for updated, k, path in found:
-                print(f"    {k}    (最近活动 {updated or '未知'}, {path.name})")
-            raise SystemExit("  例如: python3 set-heartbeat.py "
-                             f"{args.project} --key {keys[0]}")
-        key = keys[0]
-        print(f"  自动发现会话键: {key}   (来自 {found[0][2].name})")
+    # 逐台定会话键。任何一台定不下来就整体停手 —— 半批写入会让"配了几台"变成
+    # 要人肉核对的事,而这正是本脚本要消灭的东西。
+    plans = []
+    for block in targets:
+        key, source = resolve_key(args, data_dir, block, prev_heartbeat_key(doc, block["name"]))
+        plans.append({"name": block["name"], "key": key, "source": source})
+        print(f"  ▸ {block['name']:<12} {key}   {source}")
+    print()
 
-    hb = build_heartbeat(key, True, args.interval, args.prompt, args.timeout,
-                         args.silent, args.only_when_idle)
-    new_lines = splice(lines, target, hb)
-    note = verify("\n".join(new_lines), args.project, key, True, extras=extras_of(args))
+    # 倒序改:插入新行会让**后面**区块的行号偏移,从后往前处理就不必重算区间
+    by_name = {b["name"]: b for b in targets}
+    new_lines = list(lines)
+    for plan in sorted(plans, key=lambda p: by_name[p["name"]]["start"], reverse=True):
+        hb = build_heartbeat(plan["key"], not args.off, opts["interval"], opts["prompt"],
+                             opts["timeout"], opts["silent"], opts["only_when_idle"])
+        new_lines = splice(new_lines, by_name[plan["name"]], hb)
+    new_text = "\n".join(new_lines) + "\n"
+
+    # 落盘前回验:解析得过,且每一台的值都确实落在它自己那个 project 上
+    notes = []
+    for plan in plans:
+        note = verify(new_text, plan["name"], plan["key"], not args.off,
+                      extras=effective_extras(opts))
+        if note:
+            notes.append(note)
+    if args.dry_run:
+        print(f"  --dry-run:未写盘(将要写 {len(plans)} 个 project 的 [projects.heartbeat] 段)")
+        print(f"     参数:{describe_opts(opts)}")
+        for note in notes:
+            print(f"     ⚠️ {note}")
+        return 0
 
     # 先备份:改坏了能立刻还原,不用重新部署
     backup = cfg.with_suffix(cfg.suffix + ".bak")
-    backup.write_text(text, encoding="utf-8")
-    cfg.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-    # 配置里有 provider 密钥,保持创建时的收紧权限
+    write_text_lf(backup, text)
+    write_text_lf(cfg, new_text)
     try:
-        cfg.chmod(0o600)
+        cfg.chmod(0o600)    # 含密钥,保持创建时的收紧权限
     except OSError:
         pass
 
-    print(f"  ✅ 已启用 {args.project} 的心跳")
-    if note:
+    print(f"  ✅ 已{'关闭' if args.off else '启用'} {len(plans)} 个 project 的心跳")
+    for plan in plans:
+        print(f"     · {plan['name']:<12} session_key = {plan['key']}")
+    print(f"     参数{'（照抄自 ' + args.like + '）' if args.like else ''}:"
+          f"{describe_opts(opts)}")
+    for note in notes:
         print(f"     ⚠️ {note}")
     print(f"     备份: {backup}")
-    # 只报"这次实际写了什么",不替 cc-connect 声张它的默认值
-    written = [f"interval_mins={args.interval or 30}"]
-    for key, val in (("only_when_idle", args.only_when_idle), ("silent", args.silent)):
-        written.append(f"{key}={val}" if val is not None else f"{key}=(未指定,沿用默认)")
-    print(f"     本次写入: {', '.join(written)}")
     return report_restart(args)
 
 

@@ -529,8 +529,140 @@ else
 fi
 echo
 
-# ---------- 16. 产物不外泄 ----------
-echo "══ 16. 沙盒之外没有写入 ══"
+# ---------- 16. 多 project 与 --like ----------
+# 场景:又部署了 9 台机器人,要求"心跳与现有那台完全一致"。参数从源 project 的
+# 心跳段照抄 —— 中文提示词经飞书转发会变成 U+FFFD,手抄就是抄错来源,所以这条必须验。
+echo "══ 16. 多 project 配心跳 + --like 照抄源 project ══"
+VD2="$VD/multi"
+CFG2="$VD2/config.toml"
+DATA2="$VD2/data"
+mkdir -p "$DATA2/sessions"
+# TOML 基本字符串里反斜杠是转义符,Windows 路径要转成 D:/ 形式
+DATA2_TOML="$(cygpath -m "$DATA2" 2>/dev/null || printf '%s' "$DATA2" | tr '\\' '/')"
+
+# 源 project 的值故意都不是默认值(3 分钟、false、true、中文提示词),
+# 这样"照抄了"与"用了默认值"在断言里能区分开
+cat > "$CFG2" <<EOF
+data_dir = "$DATA2_TOML"
+
+[[projects]]
+name = "codex"
+
+  [projects.agent]
+    type = "codex"
+
+  [projects.heartbeat]
+    enabled = true
+    session_key = "feishu:oc_src:ou_src"
+    interval_mins = 3
+    only_when_idle = false
+    silent = true
+    prompt = "请继续之前的工作"
+
+[[projects]]
+name = "codex1"
+
+  [projects.agent]
+    type = "codex"
+
+[[projects]]
+name = "codex2"
+
+  [projects.agent]
+    type = "codex"
+EOF
+cp "$CFG2" "$VD2/before.toml"
+write_snapshot "$DATA2/sessions/codex1_1a2b3c4d.json" feishu:oc_c1:ou_c1
+write_snapshot "$DATA2/sessions/codex2_1a2b3c4d.json" feishu:oc_c2:ou_c2
+
+# 坏输入先验:一台都不该被写进去
+run_multi() { "$PY" "$HERE/set-heartbeat.py" "$@" --config "$CFG2" 2>&1; }
+reject() {   # reject <说明> <期望文案> <参数...>
+    local desc="$1" want="$2"; shift 2
+    local out; out="$(run_multi "$@")" && { fail "$desc —— 竟然退 0"; echo "$out" | sed 's/^/     | /'; return; }
+    printf '%s' "$out" | grep -qF -- "$want" && ok "$desc" \
+        || { fail "$desc —— 实际输出:"; echo "$out" | sed 's/^/     | /'; }
+}
+reject "--key 配多台被拒" "只能配单个 project" codex1 codex2 --key feishu:oc_x:ou_x
+reject "--off 与 --like 同时用被拒" "不能同时用" codex1 --off --like codex
+reject "--like 指向不存在的 project 被拒" "没有名为 'codex3'" codex1 --like codex3
+reject "--like 源没有心跳段被拒" "没有 [projects.heartbeat] 段" codex1 --like codex1
+cmp -s "$CFG2" "$VD2/before.toml" && ok "四类坏输入都没有写盘" || fail "坏输入却改了配置"
+
+# --dry-run 只报告
+out="$(run_multi codex1 codex2 --like codex --dry-run)"
+printf '%s' "$out" | grep -qF -- "--dry-run:未写盘" && ok "--dry-run 明说未写盘" || fail "--dry-run 没说未写盘"
+printf '%s' "$out" | grep -qF -- "interval_mins=3" && ok "--dry-run 报出将要照抄的参数" || fail "--dry-run 没报参数"
+cmp -s "$CFG2" "$VD2/before.toml" && ok "--dry-run 确实没落盘" || fail "--dry-run 却写了盘"
+
+# 正式写:两台一次配好
+out="$(run_multi codex1 codex2 --like codex)"
+printf '%s' "$out" | grep -qF -- "已启用 2 个 project 的心跳" && ok "报告写入了 2 台" \
+    || { fail "没有报告写入 2 台"; echo "$out" | sed 's/^/     | /'; }
+
+"$PY" - "$CFG2" "$VD2/before.toml" <<'PYEOF' > "$VD2/check.out" 2>&1
+import pathlib, sys, tomllib
+
+def leaves(node, prefix=()):
+    out = {}
+    if isinstance(node, dict):
+        for k, v in node.items():
+            out.update(leaves(v, prefix + (str(k),)))
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            out.update(leaves(v, prefix + (str(i),)))
+    else:
+        out[prefix] = node
+    return out
+
+def load(path):
+    return tomllib.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+
+def proj(doc, name):
+    return next((p for p in doc["projects"] if p.get("name") == name), None)
+
+now, before = load(sys.argv[1]), load(sys.argv[2])
+problems = []
+
+# 1) 两台各自的键:必须是自己的会话,不能串台
+for name, want in (("codex1", "feishu:oc_c1:ou_c1"), ("codex2", "feishu:oc_c2:ou_c2")):
+    hb = (proj(now, name) or {}).get("heartbeat") or {}
+    if hb.get("session_key") != want:
+        problems.append(f"{name}.session_key = {hb.get('session_key')!r},期望 {want!r}")
+    # 2) 参数照抄源 project
+    for field, expected in (("interval_mins", 3), ("only_when_idle", False),
+                            ("silent", True), ("prompt", "请继续之前的工作"),
+                            ("enabled", True)):
+        if hb.get(field) != expected:
+            problems.append(f"{name}.{field} = {hb.get(field)!r},期望 {expected!r}")
+
+# 3) 源 project 一字未动(逐叶子比对:多一个键、少一个键、改一个值都算)
+src_now, src_before = leaves(proj(now, "codex")), leaves(proj(before, "codex"))
+if src_now != src_before:
+    only_now = {k: v for k, v in src_now.items() if src_before.get(k) != v}
+    problems.append(f"源 project 被动过:{only_now}")
+
+# 4) 只有这三台有心跳
+with_hb = [p.get("name") for p in now["projects"] if p.get("heartbeat")]
+if sorted(with_hb) != ["codex", "codex1", "codex2"]:
+    problems.append(f"带心跳的 project 是 {with_hb}")
+
+print("\n".join(problems) if problems else "CLEAN")
+PYEOF
+if grep -q CLEAN "$VD2/check.out"; then
+    ok "两台各拿自己的会话键、参数照抄源、源 project 未动、无第三台被写"
+else
+    fail "多台写入结果不对:"; sed 's/^/     | /' "$VD2/check.out"
+fi
+
+# 重复跑:原地替换,不堆叠
+run_multi codex1 codex2 --like codex > "$VD2/again.out" 2>&1
+[ "$(grep -c 'projects.heartbeat' "$CFG2")" = "3" ] \
+    && ok "重跑原地替换,没有堆叠出多余的段" || fail "心跳段堆叠了"
+echo
+
+# ---------- 17. 产物不外泄 ----------
+echo "══ 17. 沙盒之外没有写入 ══"
 [ -d "$HERE/.verify-mh" ] && ok "所有产物都在 $VD 内" || fail "沙盒目录异常"
 echo
 

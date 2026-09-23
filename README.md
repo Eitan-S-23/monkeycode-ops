@@ -138,14 +138,47 @@ curl -fsSL https://raw.githubusercontent.com/Eitan-S-23/monkeycode-ops/main/add-
 python3 set-allow-from.py                 # 巡检:只列出发现到的 ID,不改配置
 python3 set-allow-from.py --apply --restart
 
-# 5. 可选:配心跳(session_key 自动发现),逐个来
-python3 set-heartbeat.py codex1 --restart
+# 5. 配心跳:参数照抄现有那台,只把 session_key 换成各自的
+python3 set-heartbeat.py codex1 codex2 codex3 codex4 codex5 codex6 codex7 codex8 codex9 --like codex --dry-run
+python3 set-heartbeat.py codex1 codex2 codex3 codex4 codex5 codex6 codex7 codex8 codex9 --like codex --restart
 ```
 
 `set-allow-from.py` 的 `open_id` 是从会话快照 `${data_dir}/sessions/codex<N>_*.json`
 里的会话键(`feishu:<chatID>:<userID>`)反查的,不自造也不人工抄;空的 `allow_from`
 在 cc-connect 里等于不设限,谁都能用,所以这一步别省。群里有多个人时它只写进第一个
 ID,要允许多人手工用逗号拼。
+
+### 心跳与 /cron:9 台怎么与现有那台对齐
+
+**心跳有配置,`--like` 照抄。** `[projects.heartbeat]` 是 per-project 的配置段,所以
+9 台要各写一段 —— 但参数别手抄:`--like codex` 把源 project 的
+`interval_mins` / `timeout_mins` / `only_when_idle` / `silent` / `prompt` 原样抄过来,
+**只换 session_key**(每台的会话键不同,套用会互相抢会话)。中文提示词经飞书转发会
+变成 U+FFFD,手抄参数抄错一位又不报任何错 —— 这是这条命令存在的全部理由。命令行的
+`--interval` / `--prompt` / `--silent` 等仍然优先于 `--like`(可用于有意偏离的某一台),
+`--dry-run` 会先把"将写什么"逐台打出来。`enabled` 恒为 `true`,要关某台用
+`python3 set-heartbeat.py codex3 --off`。
+
+**`/cron` 没有 per-project 配置,不需要脚本。** 与心跳不同,`CronConfig` 是**进程级**
+的,调度器对每个 engine 都会注入(`cmd/cc-connect/main.go:975`),所以 9 台与新装的
+project 天生就有 `/cron` 命令。它此前不可用的唯一原因是 `admin_from` 为空(命令对
+非管理员一律回"需要管理员"),而白名单在上一步已经回填 —— 也就是说**第 4 步做完,
+9 台的 `/cron` 就都能用了**。
+
+需要留意的是**任务清单是各机器人自己的数据**,不在 `config.toml` 里,而是
+`{data_dir}/crons/jobs.json` 的一串 `CronJob`,每条都带自己的 `project` 与
+`session_key` 字段(`core/cron.go:23-41`):
+
+- `/cron add` 写入的 `project` 与 `session_key` 取自**发命令时所在的那个会话**
+  (`core/engine.go:13902-13907`:`Project: e.name, SessionKey: msg.SessionKey`),
+  所以"把这台的任务也放到那台上"最稳的做法是**在每台自己的聊天里重发一遍同样的
+  `/cron add …`** —— 项目、会话键、时区都由 cc-connect 自己填对。
+- 直接编辑 `jobs.json` 复制条目**不行**:会话键抄过去,任务会在 `codex3` 的 engine 里
+  跑、却把结果发进旧机器人的会话(`core/engine.go:1490` 用 `job.SessionKey` 解析回复
+  目标),而这不报任何错。真要在文件层面复制,必须逐条把 `project` 与 `session_key`
+  一起换成目标的。
+- 查看:`/cron` 卡片按 session_key 列出(`core/engine.go:13443`)、`/cron list` 按
+  project 列出(`core/engine.go:13955`),两个视角在单机器人下等价。
 
 **换 App secret / 重新分配机器人**:改完 `bots9.env` 重跑 `--update`,只会就地替换已存在
 project 的 `app_id` / `app_secret`,其余键一字不动。已存在的 project 默认跳过;要强制
@@ -191,7 +224,8 @@ project 的 `app_id` / `app_secret`,其余键一字不动。已存在的 project
 **配置合并**(在容器里跑)
 - `apply-providers.py` — 把导出的 provider 段并进容器的 `config.toml`
 - `set-heartbeat.py` — 配心跳;session_key 自动发现(扫快照文件里所有像
-  `平台:会话:用户` 的字符串,不赌它落在哪个字段)
+  `平台:会话:用户` 的字符串,不赌它落在哪个字段);可一次配多台,
+  `--like <project>` 照抄某台的心跳参数、只换各自的 session_key
 - `set-agent-proxy.py` — 给 codex / claude 两个 agent 注入 Clash 代理(上一条的
   下一层,做法见「让 codex / claude 跟着分流走」)
 - `add-codex-bots.py` — 把现有 `codex` project 整块复制成 9 个机器人 project
