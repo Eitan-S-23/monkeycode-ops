@@ -1,8 +1,10 @@
 # ── 真实凭证:绝不进仓库 ───────────────────────────────────────────
 # bots.env     飞书 App ID / App Secret(两个机器人各一对)+ provider 的 key
+# bots9.env    9 个 codex 机器人的 App ID / App Secret(make-bots9-env.py 生成)
 # providers.toml 几十个中转站的 api_key,80KB
 # 两者都在本机重新生成,做法见 README「密钥从哪来」。仓库里永远不该有它们。
 bots.env
+bots9.env
 providers.toml
 
 # ── 可重新获取的缓存 ───────────────────────────────────────────────
@@ -18,12 +20,14 @@ providers.toml
 # .verify-clash.sh 会把 clash-install.sh 的路径改成临时目录再跑,
 # .verify-bootstrap.sh 会造仓库副本验判台逻辑,.verify-b64cmd/ 存 base64 中间结果;
 # .verify-agent-proxy.sh 造仿造的 config.toml 验增删代理段的对称性;
+# .verify-bots9.sh 造仿造的 config.toml + 假会话目录,验 9 机器人克隆与白名单回填;
 # 都是可重跑出来的。
 .verify-b64cmd/
 .verify-restore/
 .verify-bootstrap/
 .verify-tmp/
 .verify-agent-proxy/
+.verify-bots9/
 
 # python 的字节码缓存:验证脚本里 py_compile 那一步若不重定向就会留一个(已重定向,
 # 这里兜底,免得以后再踩)

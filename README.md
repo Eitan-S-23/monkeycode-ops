@@ -90,22 +90,88 @@ TOML 解析器回验,解析不过绝不落盘。
 ⚠️ **重新跑 `deploy-codex.sh` 会重写 `config.toml`,写进去的 env 段会一起没掉**,
 需要重跑一次本脚本。`restore-all.sh` 不重写 `config.toml`,所以容器重启不受影响。
 
+## 扩容:再挂 9 个 codex 机器人(`add-codex-bots.py` + `set-allow-from.py`)
+
+场景:手里又多了 9 个飞书 App,要作为 9 个 `codex1`…`codex9` project 挂进同一个
+cc-connect,agent 配置与现有的 `codex` project 完全一致。
+
+**为什么要脚本而不是手抄**:provider、`sandbox_mode`、模型别名、`env` 这些抄错一处,
+只会以"某个机器人行为不对"的形式暴露;而一个飞书 App 的长连接只能挂一个 project,
+App ID 与 Secret 也不能串台。所以 `add-codex-bots.py` 是**整块复制**现有 `codex`
+project 的正文,只改必须改的键,并在落盘前用 TOML 解析器把新 project 与源 project
+**逐路径比对** —— 差异超出下面这四条就直接报错、不落盘。
+
+有意与源 project 不同的四处(脚本每次运行都会打印,不藏在日志里):
+
+| 改动 | 为什么 |
+|---|---|
+| `name` → `codex<N>` | cc-connect 按 name 认 project |
+| `codex_home` → `/workspace/codex-home<N>` | 9 个机器人共用一份会让多进程并发改同一个 `auth.json`(每次会话启动都写),写坏了表现为"某个机器人起不来";`/sessions` 还会互相看到对方的会话 |
+| `app_id` / `app_secret` | 每个机器人一个 App;一个 App 的长连接只能挂一个 project |
+| 丢弃 `admin_from` / `allow_from` / `heartbeat` | 前两者是**按 App 隔离的 open_id**(新 App 里同一个人的 `ou_xxx` 不同),照抄的结果是你的消息被静默忽略、且不报任何错;`heartbeat` 的 `session_key` 里带着旧机器人的会话,照抄等于 9 个机器人的心跳全推进同一个旧会话 |
+
+三步(前两步在本机,其余在容器里):
+
+```bash
+# 1. 本机:按 secret.txt 生成 bots9.env(含真实密钥,别贴进聊天)
+python make-bots9-env.py
+
+# 2. 本机:投递进容器 —— 生成一条 base64 命令,粘进 web 终端
+bash make-upload-cmd.sh bots9.env
+
+# 3. 容器:先看它打算做什么,再落盘
+python3 add-codex-bots.py bots9.env --dry-run
+python3 add-codex-bots.py bots9.env --restart
+```
+
+脚本本体也从仓库取(容器里一行,纯 ASCII):
+
+```
+curl -fsSL https://raw.githubusercontent.com/Eitan-S-23/monkeycode-ops/main/add-codex-bots.py -o /workspace/cc-connect/add-codex-bots.py
+```
+
+**重启之后还有两步**(脚本收尾时也会打印):
+
+```bash
+# 4. 先逐个给 9 个机器人发一条消息 —— 没收到过消息的机器人在 cc-connect 里没有会话;
+#    白名单要从会话键里反查你的 open_id,没会话就查不到
+python3 set-allow-from.py                 # 巡检:只列出发现到的 ID,不改配置
+python3 set-allow-from.py --apply --restart
+
+# 5. 可选:配心跳(session_key 自动发现),逐个来
+python3 set-heartbeat.py codex1 --restart
+```
+
+`set-allow-from.py` 的 `open_id` 是从会话快照 `${data_dir}/sessions/codex<N>_*.json`
+里的会话键(`feishu:<chatID>:<userID>`)反查的,不自造也不人工抄;空的 `allow_from`
+在 cc-connect 里等于不设限,谁都能用,所以这一步别省。群里有多个人时它只写进第一个
+ID,要允许多人手工用逗号拼。
+
+**换 App secret / 重新分配机器人**:改完 `bots9.env` 重跑 `--update`,只会就地替换已存在
+project 的 `app_id` / `app_secret`,其余键一字不动。已存在的 project 默认跳过;要强制
+换白名单用 `set-allow-from.py --force`。
+
+改动前的备份落在 `config.toml.pre-bots` 与 `config.toml.pre-allow`,改坏了可以直接还原。
+
 ## 密钥从哪来(为什么仓库里没有)
 
-**仓库零密钥,而且不需要备份密钥就能重建** —— 因为两个密钥文件都是**本机生成**的:
+**仓库零密钥,而且不需要备份密钥就能重建** —— 因为密钥文件都是**本机生成**的:
 
 | 文件 | 生成方式 | 输入源 |
 |---|---|---|
 | `providers.toml` | `python export-local-providers.py` | 本机 `~/.cc-connect/config.toml` |
 | `bots.env` | `python make-bots-env.py` | 本机 `secret.txt` + 上一步的 `providers.toml` |
+| `bots9.env` | `python make-bots9-env.py` | 本机 `secret.txt`(9 个 codex 机器人那几段) |
 
-两个输入源(`~/.cc-connect/config.toml` 和 `secret.txt`)都只在本机,**都不进这个
-仓库**。只要本机还在,这两个文件随时能重新生成;真丢了也该先救那两样,而不是救
+输入源(`~/.cc-connect/config.toml` 和 `secret.txt`)都只在本机,**都不进这个
+仓库**。只要本机还在,这些文件随时能重新生成;真丢了也该先救那两样,而不是救
 这个仓库。
 
 **顺序不能反**:`make-bots-env.py` 要读 `providers.toml`,所以先导出 providers。
+`make-bots9-env.py` 只吃 `secret.txt`,与 providers 无关,随时可跑。
 
-生成出来的两个文件请当密钥文件对待 —— 别提交进仓库、别贴进聊天。
+生成出来的文件请当密钥文件对待 —— 别提交进仓库、别贴进聊天。
+`.verify-nosecrets.sh` 会把这三个文件里的真值逐个拿去搜已跟踪文件,推之前跑一遍。
 
 ## 文件清单
 
@@ -119,6 +185,8 @@ TOML 解析器回验,解析不过绝不落盘。
 **配置生成**(在本机跑)
 - `export-local-providers.py` — 从本机 cc-connect 配置导出 provider 段
 - `make-bots-env.py` — 按 `secret.txt` + `providers.toml` 生成 `bots.env`
+- `make-bots9-env.py` — 按 `secret.txt` 生成 `bots9.env`(9 个 codex 机器人的凭证;
+  段名只认 `monkey-codex<序号>`,混进别的段会报错而不是静默少部署)
 
 **配置合并**(在容器里跑)
 - `apply-providers.py` — 把导出的 provider 段并进容器的 `config.toml`
@@ -126,6 +194,9 @@ TOML 解析器回验,解析不过绝不落盘。
   `平台:会话:用户` 的字符串,不赌它落在哪个字段)
 - `set-agent-proxy.py` — 给 codex / claude 两个 agent 注入 Clash 代理(上一条的
   下一层,做法见「让 codex / claude 跟着分流走」)
+- `add-codex-bots.py` — 把现有 `codex` project 整块复制成 9 个机器人 project
+  (见「扩容:再挂 9 个 codex 机器人」)
+- `set-allow-from.py` — 从会话快照反查 open_id,回填 `allow_from` / `admin_from`
 
 **命令生成**(在本机跑,专为过飞书)
 - `make-skill-cmd.sh` / `make-fallback-cmd.py` / `make-upload-cmd.sh` /
@@ -139,6 +210,9 @@ TOML 解析器回验,解析不过绝不落盘。
 **本地验证**(在本机跑)
 - `.verify-*.sh` / `.verify-*.py` — 每个都对着真实 CLI 或 cc-connect 源码比对,
   不是对着自己的假设比对
+- `.verify-bots9.sh` — 用仿造的 `config.toml` 与假会话目录跑通扩容那三个脚本:
+  断言新 project 与源 project 的差异**只有**声明的那几处、`allow_from` 落在
+  `platforms.options` 而 `admin_from` 落在 `projects` 层、原有 project 的字节一字未动
 
 ## 本机验证依赖
 

@@ -14,6 +14,11 @@
 #   CODEX_MODEL、CODEX_BASE、CLAUDE_BASE 这类是模型名和中转站地址,本来就该
 #   出现在脚本的用法说明和测试夹具里,命中它们不算泄漏 —— 否则这个闸门会因为
 #   天天误报而被无视,那才是真的危险。
+#   *_APP_ID 也不在判据里(它单独不能认证,且与既有 bots.env 的处理一致);
+#   真正要守住的是 32 位的 App Secret 与各家中转站的 api_key。
+#
+# 覆盖的密钥文件:providers.toml、bots.env(deploy-codex.sh 用)、
+#   bots9.env(9 个 codex 机器人用,make-bots9-env.py 生成)。三份都在本机,都不进仓库。
 #
 # 用法: bash .verify-nosecrets.sh
 
@@ -29,7 +34,7 @@ echo "══ 1. 密钥文件本身没有被跟踪 ══"
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   echo "  ⚠️ 还没 git init,跳过(先 init 再跑这个闸门)"
 else
-  for f in bots.env providers.toml; do
+  for f in bots.env bots9.env providers.toml; do
     if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
       echo "  ❌ $f 已被 git 跟踪 —— 它含真实凭证,必须从索引里移除"
       fail=1
@@ -52,9 +57,11 @@ p = pathlib.Path('providers.toml')
 if p.is_file():
     for m in re.finditer(r'api_key\s*=\s*"([^"]{12,})"', p.read_text(encoding='utf-8')):
         origin.setdefault(m.group(1), 'providers.toml:api_key')
-b = pathlib.Path('bots.env')
-if b.is_file():
-    for line in b.read_text(encoding='utf-8').splitlines():
+for name in ('bots.env', 'bots9.env'):
+    f = pathlib.Path(name)
+    if not f.is_file():
+        continue
+    for line in f.read_text(encoding='utf-8').splitlines():
         line = line.strip()
         if not line or line.startswith('#') or '=' not in line:
             continue
@@ -62,10 +69,10 @@ if b.is_file():
         k = k.strip()
         v = v.strip().strip('"').strip("'")
         if len(v) >= 12 and var_re.search(k):
-            origin.setdefault(v, 'bots.env:' + k)
+            origin.setdefault(v, name + ':' + k)
 
 if not origin:
-    print('  ⚠️ 本机找不到 providers.toml / bots.env,没得比对 —— 闸门这次是空转的')
+    print('  ⚠️ 本机找不到 providers.toml / bots.env / bots9.env,没得比对 —— 闸门这次是空转的')
     raise SystemExit(0)
 
 print('  凭据值 %d 条参与比对(值不打印)' % len(origin))
@@ -111,9 +118,11 @@ def add(u):
     if m and 'example' not in m.group(1) and 'localhost' not in m.group(1):
         hosts.add(m.group(1))
 
-b = pathlib.Path('bots.env')
-if b.is_file():
-    for line in b.read_text(encoding='utf-8').splitlines():
+for name in ('bots.env', 'bots9.env'):
+    f = pathlib.Path(name)
+    if not f.is_file():
+        continue
+    for line in f.read_text(encoding='utf-8').splitlines():
         line = line.strip()
         if not line or line.startswith('#') or '=' not in line:
             continue
