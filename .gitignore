@@ -28,6 +28,9 @@ providers.toml
 .verify-tmp/
 .verify-agent-proxy/
 .verify-bots9/
+# .verify-inspect.sh:仿造 config.toml + jobs.json + cc.log,跑通巡检脚本的每条分支
+# (含"认错台"守卫),断言失败时夹具会留下来供查看
+.verify-inspect/
 
 # python 的字节码缓存:验证脚本里 py_compile 那一步若不重定向就会留一个(已重定向,
 # 这里兜底,免得以后再踩)

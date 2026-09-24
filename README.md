@@ -186,6 +186,35 @@ project 的 `app_id` / `app_secret`,其余键一字不动。已存在的 project
 
 改动前的备份落在 `config.toml.pre-bots` 与 `config.toml.pre-allow`,改坏了可以直接还原。
 
+## 共享终端:那条临时通道能做什么、不能做什么
+
+控制台里「终端 → 远程协助」生成的"连接地址 + 连接密码",是本机直达容器的**唯一**入口
+(本机到容器没有别的通道)。它的边界是实测出来的,写在这里免得下次再摸一遍:
+
+| 事实 | 怎么知道的(2026-09-24 实测) |
+|---|---|
+| 密码是**入场券**,不是会话寿命 | 同一密码 4~6 次连接后开始一律报"验证密码失败";换一个新密码立刻恢复。控制台上"重新生成"就是把旧券作废。平台侧没有时长参数(前端 bundle 里 share 接口的 body 只有 `{id, terminal_id, mode}`,也没有任何续期端点) |
+| **已经进场的连接不会被赶走** | 密码失效之后,已挂住的连接继续 ping 成功 15 分钟以上 —— 保活进程能一直留着 |
+| 那个终端会话本身长期存在 | 隔天重连,屏幕里还是上次的滚动内容与同一个 shell 状态(pty 不在浏览器里) |
+| **长命令会被吃字、串引号** | 700 字符的一整条命令把 shell 卡进了 `dquote>` 续行,只能靠 Ctrl-C 救;短命令(200 字符内)基本无损 |
+
+结论:**它适合"人在场 + 一个窗口内把活干完",不适合无人值守**。所以窗口期里只粘一条极短的
+`curl | bash`,要看的东西让脚本自己打:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Eitan-S-23/monkeycode-ops/main/inspect-state.sh | bash
+```
+
+`inspect-state.sh` 一条命令打完四件事:①心跳与 `/cron` 任务对表(用 `tomllib` 读,不靠 grep;
+会话键只打尾 6 位,且会算出"任务 ↔ 心跳"的会话键是否对得上 —— 跨机器人照抄过任务的话,
+这里会显示"❌不一致")②进程与日志 ③出网可达性(raw.githubusercontent / api.github.com /
+trycloudflare / workers.dev)④容器里现成的隧道与凭证(cloudflared 状态、`git remote`、
+凭证文件)。**③④ 两节就是"要不要再修一条常驻通道"的判据**。
+
+配套的客户端在本机(不进仓库):`cc-connect-ops/.cache/mc-term.py`,纯标准库,四个子命令 ——
+`probe`(验密码)、`exec`(跑命令,带回退出码)、`keep`(保活,把会话钉住并逐次记存活时长)、
+`send`(发原始按键,`\x03` 就是 Ctrl-C)。密码只从 `--password` / `MC_TERM_PASSWORD` 读,不落盘。
+
 ## 密钥从哪来(为什么仓库里没有)
 
 **仓库零密钥,而且不需要备份密钥就能重建** —— 因为密钥文件都是**本机生成**的:
@@ -214,6 +243,8 @@ project 的 `app_id` / `app_secret`,其余键一字不动。已存在的 project
   的 `[5/6]` 段调用。**它只装内核,装不了订阅** —— 订阅含节点密钥,只能手工投递
 - `deploy-cc-connect.sh` / `deploy-codex.sh` / `deploy-cpa-tunnel.sh` — 首次部署
 - `rollback-cc-connect.sh` — 回滚
+- `inspect-state.sh` — 一条命令巡检(心跳与 /cron 对表、进程日志、出网可达性、隧道与凭证
+  现状);只读,输出不含凭证。用法与来由见「共享终端」一节
 
 **配置生成**(在本机跑)
 - `export-local-providers.py` — 从本机 cc-connect 配置导出 provider 段
@@ -247,6 +278,11 @@ project 的 `app_id` / `app_secret`,其余键一字不动。已存在的 project
 - `.verify-bots9.sh` — 用仿造的 `config.toml` 与假会话目录跑通扩容那三个脚本:
   断言新 project 与源 project 的差异**只有**声明的那几处、`allow_from` 落在
   `platforms.options` 而 `admin_from` 落在 `projects` 层、原有 project 的字节一字未动
+- `.verify-inspect.sh` — 用仿造的 `config.toml` + `jobs.json` + `cc.log` 跑通巡检脚本的
+  每条分支:心跳/任务对表(含故意配错的会话键)、"只在心跳不在任务"告警、出网探测打桩、
+  以及找不到 `/workspace/cc-connect` 时"认错台"的守卫。**它逮到过会在窗口期里崩的真 bug**:
+  `json.load(open())` 按平台默认编码读,容器 locale 是 POSIX 时遇到中文 jobs.json 直接
+  `UnicodeDecodeError`(已修:显式 `encoding='utf-8'` + `PYTHONIOENCODING=utf-8`)
 
 ## 本机验证依赖
 
